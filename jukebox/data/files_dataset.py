@@ -1,7 +1,7 @@
 import librosa
 import math
 import numpy as np
-import torch.distributed as dist
+import jukebox.utils.dist_adapter as dist
 from torch.utils.data import Dataset
 from jukebox.utils.dist_utils import print_all
 from jukebox.utils.io import get_duration_sec, load_audio
@@ -46,11 +46,6 @@ class FilesAudioDataset(Dataset):
         if self.labels:
             self.labeller = Labeller(hps.max_bow_genre_size, hps.n_tokens, self.sample_length, v3=hps.labels_v3)
 
-        self.t_ranges = ((self.min_duration*self.sr, self.max_duration*self.sr), # Total length
-                        (0.0,self.max_duration*self.sr),                          # Absolute pos
-                        (0.0,1.0))                                                  # Relative pos
-
-
     def get_index_offset(self, item):
         # For a given dataset item and shift, return song index and offset within song
         half_interval = self.sample_length//2
@@ -70,8 +65,16 @@ class FilesAudioDataset(Dataset):
         return index, offset
 
     def get_metadata(self, filename, test):
-        # Insert metadata loading code for your dataset here.
-        # If artist/genre labels are different from provided artist/genre lists, update labeller accordingly
+        """
+        Insert metadata loading code for your dataset here.
+        If artist/genre labels are different from provided artist/genre lists,
+        update labeller accordingly.
+
+        Returns:
+            (artist, genre, full_lyrics) of type (str, str, str). For
+            example, ("unknown", "classical", "") could be a metadata for a
+            piano piece.
+        """
         return None, None, None
 
     def get_song_chunk(self, index, offset, test=False):

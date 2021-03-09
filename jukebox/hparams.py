@@ -52,7 +52,7 @@ vqvae = Hyperparams(
     depth = 4,
     m_conv = 1.0,
     dilation_growth_rate = 3,
-    restore_vqvae=f'gs://jukebox-assets/models/5b/vqvae.pth.tar',
+    restore_vqvae=f'https://openaipublic.blob.core.windows.net/jukebox/models/5b/vqvae.pth.tar',
 )
 HPARAMS_REGISTRY["vqvae"] = vqvae
 
@@ -81,12 +81,11 @@ upsamplers = Hyperparams(
     prime_loss_fraction=0.0,
     fp16_params=False,
 )
-upsamplers.update(vqvae)
 upsamplers.update(labels)
 
 upsampler_level_0 = Hyperparams(
     level=0,
-    restore_prior='gs://jukebox-assets/models/5b/prior_level_0.pth.tar'
+    restore_prior='https://openaipublic.blob.core.windows.net/jukebox/models/5b/prior_level_0.pth.tar'
 )
 upsampler_level_0.update(upsamplers)
 HPARAMS_REGISTRY["upsampler_level_0"] = upsampler_level_0
@@ -94,7 +93,7 @@ HPARAMS_REGISTRY["upsampler_level_0"] = upsampler_level_0
 upsampler_level_1 = Hyperparams(
     level=1,
     cond_res_scale=True,
-    restore_prior='gs://jukebox-assets/models/5b/prior_level_1.pth.tar'
+    restore_prior='https://openaipublic.blob.core.windows.net/jukebox/models/5b/prior_level_1.pth.tar'
 )
 upsampler_level_1.update(upsamplers)
 HPARAMS_REGISTRY["upsampler_level_1"] = upsampler_level_1
@@ -110,15 +109,15 @@ prior_5b = Hyperparams(
     init_scale=0.1,
     c_res=1,
     beta2=0.925,
-    t_ranges=((2646000.0, 26460000.0), (0.0, 26460000.0), (0.0, 1.0)),
+    min_duration=60.0,
+    max_duration=600.0,
     use_tokens=False,
     n_tokens=0,
     prime_loss_fraction=0.0,
     merged_decoder=True,
-    restore_prior='gs://jukebox-assets/models/5b/prior_level_2.pth.tar',
+    restore_prior='https://openaipublic.blob.core.windows.net/jukebox/models/5b/prior_level_2.pth.tar',
     fp16_params=True,
 )
-prior_5b.update(vqvae)
 prior_5b.update(labels)
 HPARAMS_REGISTRY["prior_5b"] = prior_5b
 
@@ -140,17 +139,17 @@ prior_5b_lyrics = Hyperparams(
     prime_blocks=32,
     prime_init_scale=0.7,
     prime_c_res=1,
-    t_ranges=((1049580.0, 26460000.0), (0.0, 26460000.0), (0.0, 1.0)),
+    min_duration=23.8,
+    max_duration=600.0,
     use_tokens=True,
     n_tokens=512,
     prime_loss_fraction=0.4,
     merged_decoder=True,
-    restore_prior='gs://jukebox-assets/models/5b_lyrics/prior_level_2.pth.tar',
+    restore_prior='https://openaipublic.blob.core.windows.net/jukebox/models/5b_lyrics/prior_level_2.pth.tar',
     fp16_params=True,
     alignment_layer=68,
     alignment_head=2,
 )
-prior_5b_lyrics.update(vqvae)
 prior_5b_lyrics.update(labels)
 HPARAMS_REGISTRY["prior_5b_lyrics"] = prior_5b_lyrics
 
@@ -170,18 +169,19 @@ prior_1b_lyrics = Hyperparams(
     attn_order=12,
     blocks=64,
     init_scale=0.2,
+    c_res=1,
     labels_v3=True,
-    t_ranges=((786744.0, 26460000.0), (0.0, 26460000.0), (0.0, 1.0)),
+    min_duration=17.84,
+    max_duration=600.0,
     use_tokens=True,
     n_tokens=384,
     prime_loss_fraction=0.4,
     single_enc_dec=True,
-    restore_prior='gs://jukebox-assets/models/1b_lyrics/prior_level_2.pth.tar',
+    restore_prior='https://openaipublic.blob.core.windows.net/jukebox/models/1b_lyrics/prior_level_2.pth.tar',
     fp16_params=False,
     alignment_layer=63,
     alignment_head=0,
 )
-prior_1b_lyrics.update(vqvae)
 prior_1b_lyrics.update(labels_v3)
 HPARAMS_REGISTRY["prior_1b_lyrics"] = prior_1b_lyrics
 
@@ -217,6 +217,72 @@ small_prior = Hyperparams(
 )
 HPARAMS_REGISTRY["small_prior"] = small_prior
 
+small_labelled_prior = Hyperparams(
+    labels=True,
+    labels_v3=True,
+    y_bins=(10,100), # Set this to (genres, artists) for your dataset
+    max_bow_genre_size=1,
+    min_duration=60.0,
+    max_duration=600.0,
+    t_bins=64,
+)
+small_labelled_prior.update(small_prior)
+HPARAMS_REGISTRY["small_labelled_prior"] = small_labelled_prior
+
+small_single_enc_dec_prior = Hyperparams(
+    n_ctx=6144,
+    prior_width=1024,
+    prior_depth=48,
+    heads=2,
+    attn_order=12,
+    blocks=64,
+    init_scale=0.7,
+    c_res=1,
+    prime_loss_fraction=0.4,
+    single_enc_dec=True,
+    labels=True,
+    labels_v3=True,
+    y_bins=(10,100), # Set this to (genres, artists) for your dataset
+    max_bow_genre_size=1,
+    min_duration=60.0,
+    max_duration=600.0,
+    t_bins=64,
+    use_tokens=True,
+    n_tokens=384,
+    n_vocab=79,
+)
+HPARAMS_REGISTRY["small_single_enc_dec_prior"] = small_single_enc_dec_prior
+
+small_sep_enc_dec_prior = Hyperparams(
+    n_ctx=6144,
+    prior_width=1024,
+    prior_depth=50,
+    heads=2,
+    attn_order=8,
+    blocks=64,
+    init_scale=0.7,
+    c_res=1,
+    prime_width=256,
+    prime_depth=9,
+    prime_heads=2,
+    prime_attn_order=2,
+    prime_blocks=32,
+    prime_init_scale=0.7,
+    prime_c_res=1,
+    prime_loss_fraction=0.4,
+    labels=True,
+    labels_v3=True,
+    y_bins=(10,100), # Set this to (genres, artists) for your dataset
+    max_bow_genre_size=1,
+    min_duration=60.0,
+    max_duration=600.0,
+    t_bins=64,
+    use_tokens=True,
+    n_tokens=384,
+    n_vocab=79,
+)
+HPARAMS_REGISTRY["small_sep_enc_dec_prior"] = small_sep_enc_dec_prior
+
 small_upsampler = Hyperparams(
     n_ctx=8192,
     prior_width=1024,
@@ -250,6 +316,7 @@ cpu_ema = Hyperparams(
     ema_fused=False,
 )
 HPARAMS_REGISTRY["cpu_ema"] = cpu_ema
+
 
 DEFAULTS["rcall"] = Hyperparams(
     rcall_command="<unknown_rcall_command>",
@@ -336,7 +403,6 @@ DEFAULTS["prior"] = Hyperparams(
     level=0,
     cond_levels=None,
     t_bins=64,
-    t_ranges=None,
     y_cond_as_bias=False,
     copy_input=False,
     merged_decoder=False,

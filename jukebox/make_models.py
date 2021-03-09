@@ -6,7 +6,7 @@ Test on dummy outputs to see if everything matches
 import os
 import numpy as np
 import torch as t
-import torch.distributed as dist
+import jukebox.utils.dist_adapter as dist
 from jukebox.hparams import Hyperparams, setup_hparams
 from jukebox.utils.gcs_utils import download
 from jukebox.utils.torch_utils import freeze_model
@@ -38,17 +38,18 @@ def load_checkpoint(path):
     print("Restored from {}".format(restore))
     return checkpoint
 
-def save_checkpoint(logdir, name, model, opt, metrics, hps):
+def save_checkpoint(logger, name, model, opt, metrics, hps):
     with t.no_grad():
         save_hps = {**hps}
         save_hps = {k: v for k,v in save_hps.items() if k not in ['metadata_v2','metadata_v3', 'alignments', 'lyric_processor', 'midi_processor']}
         t.save({'hps': save_hps,
                 'model': model.state_dict(), # should also save bottleneck k's as buffers
                 'opt': opt.state_dict() if opt is not None else None,
-                **metrics}, f'{logdir}/checkpoint_{name}.pth.tar')
+                'step': logger.iters,
+                **metrics}, f'{logger.logdir}/checkpoint_{name}.pth.tar')
     return
 
-def restore(hps, model, checkpoint_path):
+def restore_model(hps, model, checkpoint_path):
     model.step = 0
     if checkpoint_path != '':
         checkpoint = load_checkpoint(checkpoint_path)
@@ -59,6 +60,15 @@ def restore(hps, model, checkpoint_path):
         checkpoint['model'] = {k[7:] if k[:7] == 'module.' else k: v for k, v in checkpoint['model'].items()}
         model.load_state_dict(checkpoint['model'])
         if 'step' in checkpoint: model.step = checkpoint['step']
+
+def restore_opt(opt, shd, checkpoint_path):
+    if not checkpoint_path:
+        return
+    checkpoint = load_checkpoint(checkpoint_path)
+    if "opt" in checkpoint:
+        opt.load_state_dict(checkpoint['opt'])
+    if "step" in checkpoint:
+        shd.step(checkpoint['step'])
 
 def make_vqvae(hps, device='cuda'):
     from jukebox.vqvae.vqvae import VQVAE
@@ -82,7 +92,7 @@ def make_vqvae(hps, device='cuda'):
                   **block_kwargs)
 
     vqvae = vqvae.to(device)
-    restore(hps, vqvae, hps.restore_vqvae)
+    restore_model(hps, vqvae, hps.restore_vqvae)
     if hps.train and not hps.prior:
         print_all(f"Loading vqvae in train mode")
         if hps.restore_vqvae != '':
@@ -102,7 +112,7 @@ def make_vqvae(hps, device='cuda'):
 def make_prior(hps, vqvae, device='cuda'):
     from jukebox.prior.prior import SimplePrior
 
-    prior_kwargs = dict(input_shape=(hps.n_ctx,), bins=hps.l_bins,
+    prior_kwargs = dict(input_shape=(hps.n_ctx,), bins=vqvae.l_bins,
                         width=hps.prior_width, depth=hps.prior_depth, heads=hps.heads,
                         attn_order=hps.attn_order, blocks=hps.blocks, spread=hps.spread,
                         attn_dropout=hps.attn_dropout, resid_dropout=hps.resid_dropout, emb_dropout=hps.emb_dropout,
@@ -116,10 +126,10 @@ def make_prior(hps, vqvae, device='cuda'):
                          dilation_growth_rate=hps.cond_dilation_growth_rate, dilation_cycle=hps.cond_dilation_cycle,
                          zero_out=hps.cond_zero_out, res_scale=hps.cond_res_scale,
                          checkpoint_res=hps.cond_c_res)  # have to keep this else names wrong
-    y_cond_kwargs = dict(out_width=hps.prior_width, init_scale=hps.init_scale,
-                         y_bins=hps.y_bins, t_bins=hps.t_bins, t_ranges=hps.t_ranges,
-                         max_bow_genre_size=hps.max_bow_genre_size)
 
+    y_cond_kwargs = dict(out_width=hps.prior_width, init_scale=hps.init_scale,
+                         y_bins=hps.y_bins, t_bins=hps.t_bins, sr= hps.sr, min_duration=hps.min_duration,
+                         max_duration=hps.max_duration, max_bow_genre_size=hps.max_bow_genre_size)
 
     if hps.use_tokens and not hps.single_enc_dec:
         prime_kwargs = dict(use_tokens=hps.use_tokens, prime_loss_fraction=hps.prime_loss_fraction,
@@ -142,12 +152,12 @@ def make_prior(hps, vqvae, device='cuda'):
     z_shapes = [rescale(z_shape) for z_shape in vqvae.z_shapes]
 
     prior = SimplePrior(z_shapes=z_shapes,
-                        l_bins=hps.l_bins,
+                        l_bins=vqvae.l_bins,
                         encoder=vqvae.encode,
                         decoder=vqvae.decode,
                         level=hps.level,
-                        downs_t=hps.downs_t,
-                        strides_t=hps.strides_t,
+                        downs_t=vqvae.downs_t,
+                        strides_t=vqvae.strides_t,
                         labels=hps.labels,
                         prior_kwargs=prior_kwargs,
                         x_cond_kwargs=x_cond_kwargs,
@@ -166,7 +176,7 @@ def make_prior(hps, vqvae, device='cuda'):
         from jukebox.transformer.ops import _convert_conv_weights_to_fp16
         prior.apply(_convert_conv_weights_to_fp16)
     prior = prior.to(device)
-    restore(hps, prior, hps.restore_prior)
+    restore_model(hps, prior, hps.restore_prior)
     if hps.train:
         print_all(f"Loading prior in train mode")
         pass
