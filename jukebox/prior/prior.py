@@ -1,12 +1,12 @@
 import numpy as np
 import torch as t
 import torch.nn as nn
-import torch.distributed as dist
+import jukebox.utils.dist_adapter as dist
 
 from jukebox.transformer.ops import LayerNorm
 from jukebox.prior.autoregressive import ConditionalAutoregressive2D
 from jukebox.prior.conditioners import Conditioner, LabelConditioner
-from jukebox.data.labels import Labeller
+from jukebox.data.labels import EmptyLabeller, Labeller
 
 from jukebox.utils.torch_utils import assert_shape
 from jukebox.utils.dist_utils import print_once
@@ -14,10 +14,15 @@ from jukebox.vqvae.vqvae import calculate_strides
 
 
 """
-TODO: Simplify this into an easier structure
-
-enc-dec prior vs single-transformer prior
-remove the vqvae pre-post processing into a separate vqvae-coder class
+Model the prior on vq codes conditioned on timing, artist, genre, lyrics and codes from levels above. 
+To condition on the timing, genre and artist, we use the LabelConditioner class
+To condition on the codes from the level above, we use the Conditioner class
+To condition on lyrics, we allow two types of priors:
+- Separate Encoder Decoder: This is the usual encoder-decoder style transformer. The encoder transformer autoregressively 
+models the lyrics, and we use its last layer to produce keys/values that are attened to by the decoder transformer
+- Single Encoder Decoder: This is a simplification where we combine them into a single model. We merge the text vocab 
+and VQ vocab into a single large vocab, and the lyric tokens and VQ tokens into a single longer sequence of tokens which 
+we autoregressively model together.
 """
 class SimplePrior(nn.Module):
     def __init__(self, z_shapes, l_bins, encoder, decoder, level,
@@ -126,11 +131,15 @@ class SimplePrior(nn.Module):
         if labels:
             self.labels_v3 = labels_v3
             self.labeller = Labeller(self.y_emb.max_bow_genre_size, self.n_tokens, self.sample_length, v3=self.labels_v3)
+        else:
+            self.labeller = EmptyLabeller()
 
         print(f"Level:{level}, Cond downsample:{self.cond_downsample}, Raw to tokens:{self.raw_to_tokens}, Sample length:{self.sample_length}")
 
 
     def get_y(self, labels, start, get_indices=False):
+        if isinstance(self.labeller, EmptyLabeller):
+            return None
         y = labels['y'].clone()
 
         # Set sample_length to match this level
@@ -335,7 +344,8 @@ class SimplePrior(nn.Module):
             return loss, metrics
 
     def forward(self, x, y=None, fp16=False, decode=False, get_preds=False):
-        z, *z_conds = self.encode(x)
+        bs = x.shape[0]
+        z, *z_conds = self.encode(x, bs_chunks=bs)
         loss, metrics = self.z_forward(z=z, z_conds=z_conds, y=y, fp16=fp16, get_preds=get_preds)
         if decode:
             x_out = self.decode([z, *z_conds])

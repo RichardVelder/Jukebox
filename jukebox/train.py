@@ -8,11 +8,11 @@ import fire
 import warnings
 import numpy as np
 import torch as t
-import torch.distributed as dist
+import jukebox.utils.dist_adapter as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from jukebox.hparams import setup_hparams
-from jukebox.make_models import make_vqvae, make_prior, save_checkpoint
+from jukebox.make_models import make_vqvae, make_prior, restore_opt, save_checkpoint
 from jukebox.utils.logger import init_logging
 from jukebox.utils.audio_utils import audio_preprocess, audio_postprocess
 from jukebox.utils.torch_utils import zero_grad, count_parameters
@@ -31,9 +31,11 @@ def log_aud(logger, tag, x, hps):
 
 def log_labels(logger, labeller, tag, y, hps):
     y = y.cpu().numpy()
-    txt = f''
+    txt = ''
     for item in range(y.shape[0]):
-        txt += labeller.describe_label(y)
+        description = labeller.describe_label(y[item])
+        artist, genre, lyrics = description['artist'], description['genre'], description['lyrics']
+        txt += f'{item} artist:{artist}, genre:{genre}, lyrics:{lyrics}\n'
     logger.add_text(tag, txt)
     logger.flush()
 
@@ -64,7 +66,7 @@ def get_lr_scheduler(opt, hps):
             decay = max(0.0, 1.0 - max(0.0, step - hps.lr_start_linear_decay) / hps.lr_decay)
             if decay == 0.0:
                 if dist.get_rank() == 0:
-                    warnings.warn('reached end of training')
+                    print("Reached end of training")
             return lr_scale * decay
         else:
             return hps.lr_scale * (hps.lr_gamma ** (step // hps.lr_decay)) * min(1.0, step / hps.lr_warmup)
@@ -84,6 +86,9 @@ def get_optimizer(model, hps):
     # lr scheduler
     shd = get_lr_scheduler(opt, hps)
 
+    restore_path = hps.restore_prior if hps.prior else hps.restore_vqvae
+    restore_opt(opt, shd, restore_path)
+
     # fp16 dynamic loss scaler
     scalar = None
     if hps.fp16:
@@ -99,12 +104,13 @@ def log_inputs(orig_model, logger, x_in, y, x_out, hps, tag="train"):
     print(f"Logging {tag} inputs/ouputs")
     log_aud(logger, f'{tag}_x_in', x_in, hps)
     log_aud(logger, f'{tag}_x_out', x_out, hps)
+    bs = x_in.shape[0]
     if hps.prior:
         if hps.labels:
             log_labels(logger, orig_model.labeller, f'{tag}_y_in', allgather(y.cuda()), hps)
     else:
-        zs_in = orig_model.encode(x_in, start_level=0)
-        x_ds = [orig_model.decode(zs_in[level:], start_level=level) for level in range(0, hps.levels)]
+        zs_in = orig_model.encode(x_in, start_level=0, bs_chunks=bs)
+        x_ds = [orig_model.decode(zs_in[level:], start_level=level, bs_chunks=bs) for level in range(0, hps.levels)]
         for i in range(len(x_ds)):
             log_aud(logger, f'{tag}_x_ds_start_{i}', x_ds[i], hps)
     logger.flush()
@@ -114,9 +120,10 @@ def sample_prior(orig_model, ema, logger, x_in, y, hps):
     orig_model.eval()
 
     x_in = x_in[:hps.bs_sample]
-    zs_in = orig_model.encode(x_in, start_level=0)
+    bs = x_in.shape[0]
+    zs_in = orig_model.encode(x_in, start_level=0, bs_chunks=bs)
     assert len(zs_in) == hps.levels
-    x_ds = [orig_model.decode(zs_in[level:], start_level=level) for level in range(0, hps.levels)]
+    x_ds = [orig_model.decode(zs_in[level:], start_level=level, bs_chunks=bs) for level in range(0, hps.levels)]
 
     if not hps.labels:
         y = None
@@ -128,9 +135,9 @@ def sample_prior(orig_model, ema, logger, x_in, y, hps):
         y = y[:hps.bs_sample]
 
     # Temp 1.0
-    _, *z_conds = orig_model.encode(x_in)
+    _, *z_conds = orig_model.encode(x_in, bs_chunks=bs)
     z = orig_model.sample(hps.bs_sample, z_conds=z_conds, y=y, fp16=False, temp=1.0)
-    x_sample = orig_model.decode([z, *z_conds])
+    x_sample = orig_model.decode([z, *z_conds], bs_chunks=bs)
 
     log_aud(logger, 'sample_x_T1', x_sample, hps)
     if hps.prior and hps.labels:
@@ -138,7 +145,7 @@ def sample_prior(orig_model, ema, logger, x_in, y, hps):
 
     # Recons
     for i in range(len(x_ds)):
-        log_aud(logger, f'sample_x_ds_start_{i}', x_ds[i], hps)
+        log_aud(logger, f'x_ds_start_{i}', x_ds[i], hps)
     orig_model.train()
     if ema is not None: ema.swap()
     logger.flush()
@@ -152,7 +159,7 @@ def evaluate(model, orig_model, logger, metrics, data_processor, hps):
         _print_keys = dict(l="loss", rl="recons_loss", sl="spectral_loss")
 
     with t.no_grad():
-        for i, x in logger.get_range(data_processor.train_loader):
+        for i, x in logger.get_range(data_processor.test_loader):
             if isinstance(x, (tuple, list)):
                 x, y = x
             else:
@@ -239,7 +246,7 @@ def train(model, orig_model, opt, shd, scalar, ema, logger, metrics, data_proces
         if shd is not None: shd.step()
         if ema is not None: ema.step()
         next_lr = hps.lr if shd is None else shd.get_lr()[0]
-        finished_training = False #(next_lr == 0.0)
+        finished_training = (next_lr == 0.0)
 
         # Logging
         for key, val in _metrics.items():
@@ -262,15 +269,16 @@ def train(model, orig_model, opt, shd, scalar, ema, logger, metrics, data_proces
                 orig_model.eval()
                 name = 'latest' if hps.prior else f'step_{logger.iters}'
                 if dist.get_rank() % 8 == 0:
-                    save_checkpoint(logger.logdir, name, orig_model, opt, dict(step=logger.iters), hps)
+                    save_checkpoint(logger, name, orig_model, opt, dict(step=logger.iters), hps)
                 orig_model.train()
                 if ema is not None: ema.swap()
 
         # Sample
         with t.no_grad():
-            if (logger.iters % 12000) in list(range(1, 1 + hps.iters_before_update)):
+            if (logger.iters % 12000) in list(range(1, 1 + hps.iters_before_update)) or finished_training:
                 if hps.prior:
                     sample_prior(orig_model, ema, logger, x_in, y, hps)
+
         # Input/Output
         with t.no_grad():
             if log_input_output:
@@ -289,6 +297,7 @@ def run(hps="teeny", port=29500, **kwargs):
     hps = setup_hparams(hps, kwargs)
     hps.ngpus = dist.get_world_size()
     hps.argv = " ".join(sys.argv)
+    hps.bs_sample = hps.nworkers = hps.bs
 
     # Setup dataset
     data_processor = DataProcessor(hps)

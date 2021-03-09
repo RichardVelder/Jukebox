@@ -1,8 +1,9 @@
 import os
-import numpy as np
 import torch as t
+import jukebox.utils.dist_adapter as dist
 
 from jukebox.hparams import Hyperparams
+from jukebox.data.labels import EmptyLabeller
 from jukebox.utils.torch_utils import empty_cache
 from jukebox.utils.audio_utils import save_wav, load_audio
 from jukebox.make_models import make_model
@@ -106,12 +107,15 @@ def _sample(zs, labels, sampling_kwargs, priors, sample_levels, hps):
         # Decode sample
         x = prior.decode(zs[level:], start_level=level, bs_chunks=zs[level].shape[0])
 
-        logdir = f"{hps.name}/level_{level}"
+        if dist.get_world_size() > 1:
+            logdir = f"{hps.name}_rank_{dist.get_rank()}/level_{level}"
+        else:
+            logdir = f"{hps.name}/level_{level}"
         if not os.path.exists(logdir):
             os.makedirs(logdir)
         t.save(dict(zs=zs, labels=labels, sampling_kwargs=sampling_kwargs, x=x), f"{logdir}/data.pth.tar")
         save_wav(logdir, x, hps.sr)
-        if alignments is None and priors[-1] is not None and priors[-1].n_tokens > 0:
+        if alignments is None and priors[-1] is not None and priors[-1].n_tokens > 0 and not isinstance(priors[-1].labeller, EmptyLabeller):
             alignments = get_alignment(x, zs, labels[-1], priors[-1], sampling_kwargs[-1]['fp16'], hps)
         save_html(logdir, x, zs, labels[-1], alignments, hps)
     return zs
@@ -209,7 +213,7 @@ def save_samples(model, device, hps, sample_hps):
                   total_length=total_length,
                   offset=offset,
                   ),
-             dict(artist="Celine Dion",
+             dict(artist="Céline Dion",
                   genre="Pop",
                   lyrics=gpt_2_lyrics['darkness'],
                   total_length=total_length,
